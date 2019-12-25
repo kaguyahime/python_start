@@ -1,0 +1,266 @@
+#!/usr/bin/env Python
+# coding=utf-8
+import xlrd
+import matplotlib.pyplot as plt
+from functools import reduce
+import numpy as np
+from sklearn import preprocessing
+from sklearn.metrics.pairwise import cosine_similarity
+import datetime
+#将基站数据转化为{lac_ci:[]...}
+#剔除轨迹数据中8点之前和6点之后的数据，转化为{name_data:[[lac_ci,lon,lat]}}
+def excel_to_dict(filename,txtfile):
+    track_dict ={}
+    jz_dict = {}
+    make_dict = {}
+    track,jz = read_excel(filename)
+    make = read_txt(txtfile)
+    for line in jz:
+        lac = line[0]
+        ci = line[1]
+        lon_lat = line[2:4]
+        lac_ci = str(int(lac))+'_'+ str(int(ci))
+        jz_dict[lac_ci]=lon_lat
+    for line in track:
+        lac = line[3]
+        ci = line[4]
+        lac_ci = str(int(lac)) + '_' + str(int(ci))
+        lon = line[7]
+        lat = line[8]
+        duration = line[9]
+        jz_message = []
+        #此处剔除非新城基站下的数据
+        for key,value in jz_dict.items():
+            if lac_ci == key:
+                jz_message.append(lac_ci)
+                jz_message.append(lon)
+                jz_message.append(lat)
+                jz_message.append(duration)
+        if jz_message == []:
+            continue
+        name = line[0]
+        stat_date = line[1]
+        time = str(line[2])
+        link = name+"_"+str(stat_date)
+        hour = time[8:10]
+        if int(float(hour))<8 or int(float(hour))>17:
+            continue
+        else:
+            if link in track_dict.keys():
+                track_jz.append(jz_message)
+            else:
+                track_jz = []
+                track_dict[link]=track_jz
+                track_jz.append(jz_message)
+    for line in make:
+        lac = line[3]
+        ci = line[4]
+        lac_ci = str(int(lac)) + '_' + str(int(ci))
+        lon = line[7]
+        lat = line[8]
+        duration = line[9]
+        jz_message = []
+        #此处剔除非新城基站下的数据
+        for key,value in jz_dict.items():
+            if lac_ci == key:
+                jz_message.append(lac_ci)
+                jz_message.append(lon)
+                jz_message.append(lat)
+                jz_message.append(duration)
+        if jz_message == []:
+            continue
+        name = line[0]
+        stat_date = line[1]
+        time = str(line[2])
+        link = str(name)+"_"+str(stat_date)
+        hour = time[8:10]
+        if int(float(hour))<8 or int(float(hour))>17:
+            continue
+        else:
+            if link in make_dict.keys():
+                track_jz.append(jz_message)
+            else:
+                track_jz = []
+                make_dict[link]=track_jz
+                track_jz.append(jz_message)
+    return track_dict,jz_dict,make_dict
+
+#读取excel中数据
+def read_excel(filename):
+    track = []
+    jz = []
+    # make = []
+    f = xlrd.open_workbook(filename)
+    original_data = f.sheet_by_name('Sheet1')
+    jizhan_data = f.sheet_by_name('Sheet4')
+    # make_data = f.sheet_by_name('Sheet8')
+    row_num = original_data.nrows-1
+    jz_row = jizhan_data.nrows
+    # make_row = make_data.nrows-1
+    for a in range(1,row_num):
+        track.append(original_data.row_values(a,0,10))
+    for b in range(0,jz_row):
+        jz.append(jizhan_data.row_values(b,0,4))
+    # for c in range(1,make_row):
+    #     make.append(make_data.row_values(c,0,10))
+    return track,jz
+
+def read_txt(txtfile):
+    file=open(txtfile,'r')
+    make = []
+    for line in file:
+        data = line.strip("\n")
+        line = data.split(",")
+        make.append(line)
+    return make
+
+
+#此处剔除连续点，并求出停留时间之和
+def data_cleaning(original_track_dict):
+    final_track_dict = {}
+    for key,value in original_track_dict.items():
+        final_track_list = []
+        copy_value = value.copy()
+        copy_flag = 0
+        flag = 0
+        result_flag = 0
+        for line in value:
+            if flag == 0:
+                final_track_list.append(line)
+                flag = flag + 1
+            else:
+                if line[0] == copy_value[copy_flag-1][0]:
+                    final_track_list[result_flag][3] = final_track_list[result_flag][3] + line[3]
+                    flag = flag + 1
+                else:
+                    flag = flag + 1
+                    copy_flag = flag
+                    result_flag = result_flag + 1
+                    final_track_list.append(line)
+        final_track_dict[key]=final_track_list
+    return final_track_dict
+
+#取出未知游客数据和已知游客数据合并，并踢重
+#将未知游客数据和已知游客数据与踢重后的list进行对比（按照踢重后list的顺序对比）
+#比较未知游客数据中某值的个数
+#比较已知游客数据中某值的个数
+#paramater:final_track_dict(已经处理完的轨迹数据)
+def cos_sim_train(final_track_dict,final_make_dict):
+    train_dict = get_train_dict(final_track_dict)
+    print(train_dict)
+    result = []
+    name = []
+    for key,value in final_make_dict.items():
+        for train_value in train_dict.values():
+            tour_list_all = []
+            cosim_param = []
+            tour_list_all.extend(np.array(value)[:,0:4])
+            tour_list_all.extend(np.array(train_value)[:,0:4])
+            tour_list_set = list(set(tuple(t) for t in tour_list_all))#将未知游客数据和训练数据合并
+            tour_vector,train_vector = to_vector(value, train_value, tour_list_set)
+            listA,listB = cos_sim(tour_vector,train_vector)
+            # 归一化
+            # tour_vector_result = preprocessing.scale(tour_vector)
+            # train_vector_resut = preprocessing.scale(train_vector)
+            cosim_param.append(listA)
+            cosim_param.append(listB)
+            result = cosine_similarity(cosim_param)
+            # list_A = list(map(lambda x,y:x-(x+y)/2,tour_vector,train_vector))
+            # list_B = list(map(lambda x,y:y-(x+y)/2,tour_vector,train_vector))
+            # cosim_param.append(list_A)
+            # cosim_param.append(list_B)
+            # numerator_list = map(lambda x, y: x*y, tour_vector, train_vector)
+            # numerator = sum(numerator_list)
+            # denominator_A = reduce(lambda x, y: x + y, map(lambda x: x ** 2, list_A))
+            # denominator_B = reduce(lambda x, y: x + y, map(lambda x: x ** 2, list_B))
+            # cos_result = numerator/((denominator_A**0.5)*(denominator_B**0.5))
+            cos_result = result[0][1]
+            if cos_result>=0.5:
+                name.append(key)
+                break
+        else:
+            continue
+    print(name)
+    return name
+            # tour_set = set(tour_list)
+            # print(tour_set)
+
+def to_vector(value,train_value,tour_list_set):
+    vector_1 = []
+    vector_2 = []
+    tour_vector = []
+    train_vector = []
+    for line in tour_list_set:
+        a = 0
+        for i in value:
+            if i[0]==list(line)[0]:
+                duration = 0
+                duration = duration + int(i[3])/300
+                a = a + 1+duration
+        tour_vector.append(int(a))
+    for line in tour_list_set:
+        b = 0
+        for j in train_value:
+            if j[0] == list(line)[0]:
+                duration  = 0
+                duration = duration+j[3]/300
+                b = b + 1+duration
+        train_vector.append(int(b))
+    return tour_vector, train_vector
+
+def cos_sim(train_vector,tour_vector):
+    meanlist = []
+    for a in range(len(train_vector) - 1):
+        x = train_vector[a]
+        y = tour_vector[a]
+        if x == 0 or y == 0 or y == x:
+            meanlist.append(0)
+        else:
+            meanlist.append(abs(x - y) / 2)
+    listA = list(map(lambda x, y: x - y, train_vector, meanlist))
+    listB = list(map(lambda x, y: x - y, tour_vector, meanlist))
+    return listA,listB
+
+def get_train_dict(final_track_dict):
+    train_dict = {}
+    flag = 0
+    for key, value in final_track_dict.items():
+        if flag == 10:
+            break
+        else:
+            train_dict[key] = value
+            flag = flag + 1
+    return train_dict
+
+def draw_scatter(final_track_dict):
+    for key,value in final_track_dict.items():
+        track_list = list(map(list,zip(*value)))
+        x = track_list[0]
+        y = track_list[1]
+        fig = plt.figure()
+        ax1 = fig.add_subplot(1,1,1)
+        ax1.scatter(x, y, c='r',  marker='o')
+        plt.show()
+
+def outputfile(file,filename):
+    f1 = open(filename,'w')
+    for line in file:
+        f1.write(line)
+        f1.write('\n')
+
+
+if __name__ == '__main__':
+    print(datetime.datetime.now())
+    print("#################################read_data#################################")
+    original_track_dict,original_jz_dict,original_make_dict = excel_to_dict("景区模型打点文件.xlsx","test.txt")
+    final_track_dict = data_cleaning(original_track_dict)
+    final_make_dict = data_cleaning(original_make_dict)
+    print("#################################相似度比较#################################")
+    name_list = cos_sim_train(final_track_dict,final_make_dict)
+    outputfile(name_list,"outputfile.txt")
+    print(datetime.datetime.now())
+    #draw_scatter(final_track_dict)
+
+
+
+
